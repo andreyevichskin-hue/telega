@@ -90,7 +90,7 @@ func (h *Hub) Run() { // слушает 3 канала из Hub через selec
 	}
 }
 
-func (rooms *roomsRelation) GetOrCreateRoom(name string) *Hub {
+func (rooms *roomsRelation) GetOrStartHub(name string) *Hub {
 	rooms.mu.Lock()
 	defer rooms.mu.Unlock()
 	h, ok := rooms.rooms[name]
@@ -107,6 +107,13 @@ func (rooms *roomsRelation) GetOrCreateRoom(name string) *Hub {
 		rooms.rooms[name] = h
 	}
 	return h
+}
+
+func (rooms *roomsRelation) GetRoom(name string) (*Hub, bool) {
+	rooms.mu.Lock()
+	defer rooms.mu.Unlock()
+	hub, ok := rooms.rooms[name]
+	return hub, ok
 }
 
 func (rooms *roomsRelation) RemoveRoom(name string) {
@@ -159,6 +166,44 @@ func (clnt *Client) writePump() { // пишет в client, передает из
 	}
 }
 
+func getLastRead(userID int64, room string) (int64, bool, error) {
+	var lastMsgID int64
+	err := db.QueryRow("SELECT last_message_id FROM rooms_reads WHERE user_id = ? AND room = ?", userID, room).Scan(&lastMsgID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
+		} else {
+			log.Printf("error %v", err)
+			return 0, false, err
+		}
+	}
+	return lastMsgID, true, nil
+}
+
+func getMsgsSince(room string, afterID int64) ([]Message, error) {
+	rows, err := db.Query("SELECT id, nickname, mes, reply_to_id FROM messages WHERE room = ? AND id > ? ORDER BY id ASC", room, afterID)
+	if err != nil {
+		log.Printf("error %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var history []Message
+	for rows.Next() {
+		var id int64
+		var nickname, mes string
+		var replyTo *int64
+		if err := rows.Scan(&id, &nickname, &mes, &replyTo); err != nil {
+			log.Printf("error %v", err)
+			return history, err
+		}
+		history = append(history, Message{ID: id, Nickname: nickname, Text: mes, ReplyTo: replyTo})
+	}
+	if err := rows.Err(); err != nil {
+		return history, err
+	}
+	return history, err
+}
+
 func getHistory(room string, limit int) ([]Message, error) {
 	rows, err := db.Query("SELECT id, nickname, mes, reply_to_id FROM messages WHERE room = ? ORDER BY id DESC LIMIT ?", room, limit)
 	if err != nil {
@@ -189,13 +234,16 @@ func getHistory(room string, limit int) ([]Message, error) {
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", requireAuth(wsHandler))
-	mux.HandleFunc("/rooms", requireAuth(roomsHandler))
+	mux.HandleFunc("GET /rooms", requireAuth(roomsHandler))
+	mux.HandleFunc("POST /rooms", requireAuth(createRoomHandler))
 	mux.HandleFunc("/register", registerHandler)
 	mux.HandleFunc("/login", loginHandler)
 	mux.HandleFunc("/me", requireAuth(meHandler))
 	mux.HandleFunc("/", serveIndex)
+	mux.HandleFunc("/style.css", serveStyle)
+	mux.HandleFunc("/script.js", serveScript)
 	var err error
-	db, err = sql.Open("sqlite", "file:messages?_foreign_keys=on")
+	db, err = sql.Open("sqlite", "file:telega.db?_foreign_keys=on")
 	must(err)
 	err = db.Ping()
 	must(err)
@@ -215,6 +263,12 @@ func must(err error) {
 
 func serveIndex(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "index.html")
+}
+func serveStyle(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "style.css")
+}
+func serveScript(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "script.js")
 }
 
 type contextKey string
@@ -256,22 +310,44 @@ func wsHandler(w http.ResponseWriter, r *http.Request) { // 1 запуск на 
 		http.Error(w, "unexpected error", 500)
 		return
 	}
+	roomName := r.URL.Query().Get("room")
+	var exists bool
+	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM rooms WHERE name = ?)", roomName).Scan(&exists)
+	if err != nil {
+		log.Printf("error %v", err)
+		http.Error(w, "unexpected error", 500)
+		return
+	}
+	if !exists {
+		http.Error(w, "room not found", http.StatusNotFound)
+		return
+	}
+	lastID, found, err := getLastRead(userID, roomName)
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("error %v", err)
 		return
 	}
 	log.Println("client connected")
-	hub := registry.GetOrCreateRoom(r.URL.Query().Get("room")) // уже локальный
+	hub := registry.GetOrStartHub(roomName) // уже локальный
 	clnt := &Client{
 		hub:      hub,
 		conn:     conn,
 		send:     make(chan []byte, 256),
 		nickname: nickname,
 	}
-	history, err := getHistory(r.URL.Query().Get("room"), 10)
-	if err != nil {
-		log.Printf("error %v", err)
+	var history []Message
+	if found {
+		history, err = getMsgsSince(roomName, lastID)
+		if err != nil {
+			log.Printf("error %v", err)
+		}
+	} else {
+		history, err = getHistory(roomName, 10)
+		if err != nil {
+			log.Printf("error %v", err)
+		}
 	}
 	for _, msg := range history {
 		msg, err := json.Marshal(msg)
@@ -283,25 +359,56 @@ func wsHandler(w http.ResponseWriter, r *http.Request) { // 1 запуск на 
 			log.Printf("error %v", err)
 		}
 	}
+	newLastID := lastID
+	if len(history) > 0 {
+		newLastID = history[len(history)-1].ID
+	}
+	if found {
+		_, err = db.Exec("UPDATE rooms_reads SET last_message_id = ? WHERE user_id = ? AND room = ?", newLastID, userID, roomName)
+	} else {
+		_, err = db.Exec("INSERT INTO rooms_reads (user_id, room, last_message_id) VALUES (?, ?, ?)", userID, roomName, newLastID)
+	}
+	if err != nil {
+		log.Printf("error %v", err)
+	}
+
 	hub.register <- clnt
 	go clnt.readPump()
 	go clnt.writePump()
 }
 
 func roomsHandler(w http.ResponseWriter, r *http.Request) {
-	local := make(map[string]*Hub)
-	registry.mu.Lock()
-	for name, hub := range registry.rooms {
-		local[name] = hub
+	rows, err := db.Query("SELECT name FROM rooms")
+	if err != nil {
+		log.Printf("error %v", err)
+		http.Error(w, "unexpected error", 500)
+		return
 	}
-	registry.mu.Unlock()
+	defer rows.Close()
+
 	result := make(map[string][]string)
-	for name, hub := range local {
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			log.Printf("error %v", err)
+			http.Error(w, "unexpected error", 500)
+			return
+		}
+		hub, ok := registry.GetRoom(name)
+		if !ok {
+			result[name] = []string{}
+			continue
+		}
 		reply := make(chan []string)
 		hub.list <- reply
-		names := <-reply
-		result[name] = names
+		result[name] = <-reply
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error %v", err)
+		http.Error(w, "unexpected error", 500)
+		return
+	}
+
 	response, err := json.Marshal(result)
 	if err != nil {
 		log.Printf("error %v", err)
@@ -309,6 +416,28 @@ func roomsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Write(response)
+}
+
+type RoomRequest struct {
+	Name string `json:"name"`
+}
+
+func createRoomHandler(w http.ResponseWriter, r *http.Request) {
+	var req RoomRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, "wrong JSON format", http.StatusBadRequest)
+		log.Printf("error %v", err)
+		return
+	}
+	_, err = db.Exec("INSERT OR IGNORE INTO rooms (name) VALUES (?)", req.Name)
+	if err != nil {
+		http.Error(w, "failed to create room", http.StatusInternalServerError)
+		log.Printf("error %v", err)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte("room created"))
 }
 
 func registerHandler(w http.ResponseWriter, r *http.Request) {

@@ -1,4 +1,4 @@
 /telega
 /websocat
-/messages
 *.db
+/docs/
