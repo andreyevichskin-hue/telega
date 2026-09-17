@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"slices"
@@ -243,7 +244,7 @@ func main() {
 	mux.HandleFunc("/style.css", serveStyle)
 	mux.HandleFunc("/script.js", serveScript)
 	var err error
-	db, err = sql.Open("sqlite", "file:telega.db?_foreign_keys=on")
+	db, err = sql.Open("sqlite", "file:data/telega.db?_foreign_keys=on")
 	must(err)
 	err = db.Ping()
 	must(err)
@@ -510,9 +511,11 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("logged in"))
 }
 
+var tokenReader io.Reader = rand.Reader
+
 func generateToken() (string, error) {
 	buf := make([]byte, 32)
-	_, err := rand.Read(buf)
+	_, err := io.ReadFull(tokenReader, buf)
 	if err != nil {
 		log.Printf("error %v", err)
 		return "", err
