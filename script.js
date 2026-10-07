@@ -53,6 +53,38 @@ function startChat(myNickname) {
     const replyPreview = document.getElementById("reply-preview");
     const replyPreviewText = document.getElementById("reply-preview-text");
     const replyPreviewCancel = document.getElementById("reply-preview-cancel");
+    const typingIndicator = document.getElementById("typing-indicator");
+    const chatArea = document.getElementById("chat-area");
+    const sidebar = document.getElementById("sidebar");
+    const sidebarResizer = document.getElementById("sidebar-resizer");
+
+    chatArea.addEventListener("click", () => {
+        if (window.getSelection().toString() === "") {
+            input.focus();
+        }
+    });
+
+    let resizingSidebar = false;
+    sidebarResizer.addEventListener("mousedown", () => {
+        resizingSidebar = true;
+        sidebarResizer.classList.add("dragging");
+        document.body.style.userSelect = "none";
+    });
+    document.addEventListener("mousemove", (event) => {
+        if (!resizingSidebar) {
+            return;
+        }
+        const width = Math.min(Math.max(event.clientX, 150), 480);
+        sidebar.style.width = width + "px";
+    });
+    document.addEventListener("mouseup", () => {
+        if (!resizingSidebar) {
+            return;
+        }
+        resizingSidebar = false;
+        sidebarResizer.classList.remove("dragging");
+        document.body.style.userSelect = "";
+    });
 
     let socket = null;
     let currentRoom = null;
@@ -105,6 +137,51 @@ function startChat(myNickname) {
         messages.appendChild(line);
     }
 
+    const typingTimers = new Map(); // ник -> id таймера, скрывающего его из индикатора
+
+    function updateTypingIndicator() {
+        const names = Array.from(typingTimers.keys());
+        if (names.length === 0) {
+            typingIndicator.textContent = "";
+        } else {
+            typingIndicator.textContent = names.join(", ") + (names.length === 1 ? " печатает…" : " печатают…");
+        }
+    }
+
+    function handleTypingSignal(data) {
+        if (data.nickname === myNickname) {
+            return;
+        }
+        if (typingTimers.has(data.nickname)) {
+            clearTimeout(typingTimers.get(data.nickname));
+        }
+        const timer = setTimeout(() => {
+            typingTimers.delete(data.nickname);
+            updateTypingIndicator();
+        }, 3000);
+        typingTimers.set(data.nickname, timer);
+        updateTypingIndicator();
+    }
+
+    function clearTypingIndicator() {
+        typingTimers.forEach((timer) => clearTimeout(timer));
+        typingTimers.clear();
+        typingIndicator.textContent = "";
+    }
+
+    let lastTypingSentAt = 0;
+    input.addEventListener("input", () => {
+        if (!socket || input.value === "") {
+            return;
+        }
+        const now = Date.now();
+        if (now - lastTypingSentAt < 2000) {
+            return;
+        }
+        lastTypingSentAt = now;
+        socket.send(JSON.stringify({ type: "typing" }));
+    });
+
     function connectToRoom(room) {
         if (room === currentRoom) {
             return;
@@ -121,11 +198,20 @@ function startChat(myNickname) {
         messages.innerHTML = "";
         messagesById = new Map();
         setReplyingTo(null);
+        clearTypingIndicator();
         highlightActiveRoom();
         input.value = drafts.get(room) || "";
 
         socket = new WebSocket("ws://" + location.host + "/ws?room=" + encodeURIComponent(room));
-        socket.onmessage = (event) => renderMessage(JSON.parse(event.data));
+        socket.onopen = () => refreshRooms(); // не ждать следующего тика опроса — обновить count сразу
+        socket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === "typing") {
+                handleTypingSignal(data);
+            } else {
+                renderMessage(data);
+            }
+        };
         input.focus();
     }
 
@@ -135,23 +221,46 @@ function startChat(myNickname) {
         });
     }
 
+    let expandedRooms = new Set(); // какие комнаты сейчас развёрнуты (ПКМ), переживает опрос /rooms
+
     function renderRooms(roomsMap) {
         const names = Object.keys(roomsMap).sort();
         roomList.innerHTML = "";
         names.forEach((name) => {
+            const members = roomsMap[name] || [];
+
             const item = document.createElement("div");
             item.classList.add("room-item");
             item.dataset.room = name;
             item.textContent = name;
             const count = document.createElement("span");
             count.classList.add("room-count");
-            count.textContent = (roomsMap[name] || []).length;
+            count.textContent = members.length;
             item.appendChild(count);
             item.addEventListener("click", () => connectToRoom(name));
+            item.addEventListener("contextmenu", (event) => {
+                event.preventDefault();
+                if (expandedRooms.has(name)) {
+                    expandedRooms.delete(name);
+                } else {
+                    expandedRooms.add(name);
+                }
+                renderRooms(roomsMap);
+            });
             roomList.appendChild(item);
+
+            const memberList = document.createElement("div");
+            memberList.classList.add("room-members");
+            if (expandedRooms.has(name)) {
+                memberList.classList.add("expanded");
+            }
+            memberList.textContent = members.length ? members.join(", ") : "пусто";
+            roomList.appendChild(memberList);
         });
         highlightActiveRoom();
     }
+
+    let hasAutoConnected = false;
 
     async function refreshRooms() {
         try {
@@ -161,6 +270,13 @@ function startChat(myNickname) {
             }
             const roomsMap = await response.json();
             renderRooms(roomsMap);
+            if (!hasAutoConnected && currentRoom === null) {
+                const names = Object.keys(roomsMap).sort();
+                if (names.length > 0) {
+                    connectToRoom(names[0]);
+                }
+                hasAutoConnected = true;
+            }
         } catch (err) {
             // тихо игнорируем — следующий тик обновит
         }

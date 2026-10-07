@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pressly/goose/v3"
@@ -47,9 +48,15 @@ type Message struct {
 	ReplyTo  *int64 `json:"reply_to,omitempty"`
 }
 
+type TypingSignal struct {
+	Nickname string `json:"nickname"`
+	Type     string `json:"type"`
+}
+
 type IncomingMessage struct {
 	Text    string `json:"text"`
 	ReplyTo *int64 `json:"reply_to,omitempty"`
+	Type    string `json:"type"`
 }
 
 type User struct {
@@ -125,6 +132,15 @@ func (rooms *roomsRelation) RemoveRoom(name string) {
 
 func (clnt *Client) readPump() { // читает из client, передает в Hub
 	defer clnt.conn.Close()
+	clnt.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	clnt.conn.SetPongHandler((func(appData string) error {
+		err := clnt.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if err != nil {
+			log.Printf("error %v", err)
+			return err
+		}
+		return nil
+	}))
 	for {
 		_, msg, err := clnt.conn.ReadMessage()
 		if err != nil {
@@ -136,6 +152,16 @@ func (clnt *Client) readPump() { // читает из client, передает �
 		err = json.Unmarshal(msg, &incoming)
 		if err != nil {
 			log.Printf("error %v", err)
+			continue
+		}
+		if incoming.Type == "typing" {
+			typingSignal := TypingSignal{Nickname: clnt.nickname, Type: "typing"}
+			signal, err := json.Marshal(typingSignal)
+			if err != nil {
+				log.Printf("error %v", err)
+				continue
+			}
+			clnt.hub.broadcast <- signal
 			continue
 		}
 		result, err := db.Exec("INSERT INTO messages (room, nickname, mes, reply_to_id) VALUES (?, ?, ?, ?)", clnt.hub.name, clnt.nickname, incoming.Text, incoming.ReplyTo)
@@ -158,11 +184,25 @@ func (clnt *Client) readPump() { // читает из client, передает �
 }
 
 func (clnt *Client) writePump() { // пишет в client, передает из Hub
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 	defer clnt.conn.Close()
-	for msg := range clnt.send {
-		if err := clnt.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			log.Printf("error %v", err)
-			break
+	for {
+		select {
+		case msg, ok := <-clnt.send:
+			if !ok {
+				return
+			}
+			if err := clnt.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				log.Printf("error %v", err)
+				return
+			}
+		case <-ticker.C:
+			if err := clnt.conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+				log.Printf("error %v", err)
+				return
+			}
+			clnt.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		}
 	}
 }

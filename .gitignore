@@ -2,3 +2,4 @@
 /websocat
 *.db
 /docs/
+.DS_Store

@@ -64,6 +64,10 @@ func TestGetLastRead(t *testing.T) {
 	}
 	testDB.SetMaxOpenConns(1)
 	db = testDB
+	err = goose.SetDialect("sqlite")
+	if err != nil {
+		t.Fatalf("failed to set dialect: %v", err)
+	}
 	err = goose.Up(db, "migrations")
 	if err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
