@@ -23,10 +23,16 @@ import (
 type Hub struct { // один на сервер, хранит список клиентов
 	name       string
 	clients    map[*Client]bool
-	broadcast  chan []byte // сообщение
+	broadcast  chan MessageEvent // сообщение вместе с id
 	register   chan *Client
 	unregister chan *Client
 	list       chan chan []string
+	typing     chan []byte
+}
+
+type MessageEvent struct {
+	data []byte
+	id   int64
 }
 
 type roomsRelation struct { // справочник активных комнат
@@ -39,6 +45,7 @@ type Client struct { // один на подключение, держит conn,
 	conn     *websocket.Conn
 	send     chan []byte
 	nickname string
+	userID   int64 // ! чтобы знать чью закладку двигать
 }
 
 type Message struct {
@@ -72,7 +79,7 @@ var db *sql.DB
 
 var upgrader websocket.Upgrader
 
-func (h *Hub) Run() { // слушает 3 канала из Hub через select
+func (h *Hub) Run() { // слушает каналы Hub через select
 	for {
 		select {
 		case clnt := <-h.register:
@@ -86,7 +93,11 @@ func (h *Hub) Run() { // слушает 3 канала из Hub через selec
 			}
 		case msg := <-h.broadcast:
 			for clnt := range h.clients {
-				clnt.send <- msg
+				clnt.send <- msg.data
+			}
+		case signal := <-h.typing:
+			for clnt := range h.clients {
+				clnt.send <- signal
 			}
 		case reply := <-h.list:
 			var names []string
@@ -106,10 +117,11 @@ func (rooms *roomsRelation) GetOrStartHub(name string) *Hub {
 		h = &Hub{
 			name:       name,
 			clients:    make(map[*Client]bool),
-			broadcast:  make(chan []byte),
+			broadcast:  make(chan MessageEvent),
 			register:   make(chan *Client),
 			unregister: make(chan *Client),
 			list:       make(chan chan []string),
+			typing:     make(chan []byte),
 		}
 		go h.Run()
 		rooms.rooms[name] = h
@@ -161,7 +173,7 @@ func (clnt *Client) readPump() { // читает из client, передает �
 				log.Printf("error %v", err)
 				continue
 			}
-			clnt.hub.broadcast <- signal
+			clnt.hub.typing <- signal
 			continue
 		}
 		result, err := db.Exec("INSERT INTO messages (room, nickname, mes, reply_to_id) VALUES (?, ?, ?, ?)", clnt.hub.name, clnt.nickname, incoming.Text, incoming.ReplyTo)
@@ -172,6 +184,7 @@ func (clnt *Client) readPump() { // читает из client, передает �
 		id, err := result.LastInsertId()
 		if err != nil {
 			log.Printf("error %v", err)
+			continue
 		}
 		data, err := json.Marshal(Message{ID: id, Nickname: clnt.nickname, Text: incoming.Text, ReplyTo: incoming.ReplyTo})
 		if err != nil {
@@ -179,7 +192,7 @@ func (clnt *Client) readPump() { // читает из client, передает �
 			clnt.hub.unregister <- clnt
 			break
 		}
-		clnt.hub.broadcast <- data
+		clnt.hub.broadcast <- MessageEvent{data: data, id: id}
 	}
 }
 
@@ -377,6 +390,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) { // 1 запуск на 
 		conn:     conn,
 		send:     make(chan []byte, 256),
 		nickname: nickname,
+		userID:   userID,
 	}
 	var history []Message
 	if found {
