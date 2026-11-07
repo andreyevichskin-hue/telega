@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"slices"
 	"sync"
@@ -343,7 +344,8 @@ func main() {
 	mux.HandleFunc("/", serveIndex)
 	mux.HandleFunc("/style.css", serveStyle)
 	mux.HandleFunc("/script.js", serveScript)
-	var err error
+	err := os.MkdirAll("data", 0o755)
+	must(err)
 	db, err = sql.Open("sqlite", "file:data/telega.db?_foreign_keys=on")
 	must(err)
 	err = db.Ping()
