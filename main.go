@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -278,10 +279,8 @@ func getLastRead(userID int64, room string) (int64, bool, error) {
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, false, nil
-		} else {
-			log.Printf("error %v", err)
-			return 0, false, err
 		}
+		return 0, false, fmt.Errorf("get last read user %d room %q: %w", userID, room, err)
 	}
 	return lastMsgID, true, nil
 }
@@ -289,8 +288,7 @@ func getLastRead(userID int64, room string) (int64, bool, error) {
 func getMsgsSince(room string, afterID int64) ([]Message, error) {
 	rows, err := db.Query("SELECT id, nickname, mes, reply_to_id FROM messages WHERE room = ? AND id > ? ORDER BY id ASC", room, afterID)
 	if err != nil {
-		log.Printf("error %v", err)
-		return nil, err
+		return nil, fmt.Errorf("get messages since %d room %q: %w", afterID, room, err)
 	}
 	defer rows.Close()
 	var history []Message
@@ -299,22 +297,20 @@ func getMsgsSince(room string, afterID int64) ([]Message, error) {
 		var nickname, mes string
 		var replyTo *int64
 		if err := rows.Scan(&id, &nickname, &mes, &replyTo); err != nil {
-			log.Printf("error %v", err)
-			return history, err
+			return history, fmt.Errorf("get messages since %d room %q: scan: %w", afterID, room, err)
 		}
 		history = append(history, Message{ID: id, Nickname: nickname, Text: mes, ReplyTo: replyTo})
 	}
 	if err := rows.Err(); err != nil {
-		return history, err
+		return history, fmt.Errorf("get messages since %d room %q: %w", afterID, room, err)
 	}
-	return history, err
+	return history, nil
 }
 
 func getHistory(room string, limit int) ([]Message, error) {
 	rows, err := db.Query("SELECT id, nickname, mes, reply_to_id FROM messages WHERE room = ? ORDER BY id DESC LIMIT ?", room, limit)
 	if err != nil {
-		log.Printf("error %v", err)
-		return nil, err
+		return nil, fmt.Errorf("get history room %q: %w", room, err)
 	}
 	defer rows.Close()
 	var history []Message
@@ -323,18 +319,17 @@ func getHistory(room string, limit int) ([]Message, error) {
 		var nickname, mes string
 		var replyTo *int64
 		if err := rows.Scan(&id, &nickname, &mes, &replyTo); err != nil {
-			log.Printf("error %v", err)
 			slices.Reverse(history)
-			return history, err
+			return history, fmt.Errorf("get history room %q: scan: %w", room, err)
 		}
 		history = append(history, Message{ID: id, Nickname: nickname, Text: mes, ReplyTo: replyTo})
 	}
 	if err := rows.Err(); err != nil {
 		slices.Reverse(history)
-		return history, err
+		return history, fmt.Errorf("get history room %q: %w", room, err)
 	}
 	slices.Reverse(history)
-	return history, err
+	return history, nil
 }
 
 func main() {
@@ -450,6 +445,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) { // 1 запуск на 
 		return
 	}
 	lastID, found, err := getLastRead(userID, roomName)
+	if err != nil {
+		log.Printf("ws: %v", err)
+		http.Error(w, "unexpected error", http.StatusInternalServerError)
+		return
+	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -644,8 +644,7 @@ func generateToken() (string, error) {
 	buf := make([]byte, 32)
 	_, err := io.ReadFull(tokenReader, buf)
 	if err != nil {
-		log.Printf("error %v", err)
-		return "", err
+		return "", fmt.Errorf("generate token: %w", err)
 	}
 	token := hex.EncodeToString(buf)
 	return token, nil
