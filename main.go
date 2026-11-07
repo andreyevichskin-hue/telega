@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -80,6 +81,18 @@ var db *sql.DB
 var upgrader websocket.Upgrader
 
 func (h *Hub) Run() { // слушает каналы Hub через select
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("panic in hub %q: %v\n%s", h.name, r, debug.Stack())
+			registry.RemoveRoom(h.name)
+		}
+	}()
+	lastMsgByUser := make(map[int64]int64)
+	lastMsgTransfer := make(chan map[int64]int64, 2)
+	defer close(lastMsgTransfer)
+	go writeMarkers(h.name, lastMsgTransfer)
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case clnt := <-h.register:
@@ -88,13 +101,26 @@ func (h *Hub) Run() { // слушает каналы Hub через select
 			delete(h.clients, clnt)
 			close(clnt.send)
 			if len(h.clients) == 0 {
+				if len(lastMsgByUser) > 0 {
+					lastMsgTransfer <- lastMsgByUser
+				}
 				registry.RemoveRoom(h.name)
 				return
 			}
 		case msg := <-h.broadcast:
 			for clnt := range h.clients {
+				if msg.id > lastMsgByUser[clnt.userID] {
+					lastMsgByUser[clnt.userID] = msg.id
+				}
 				clnt.send <- msg.data
 			}
+		case <-ticker.C:
+			if len(lastMsgByUser) == 0 {
+				continue
+			}
+			snapshot := lastMsgByUser
+			lastMsgTransfer <- snapshot
+			lastMsgByUser = make(map[int64]int64)
 		case signal := <-h.typing:
 			for clnt := range h.clients {
 				clnt.send <- signal
@@ -107,6 +133,31 @@ func (h *Hub) Run() { // слушает каналы Hub через select
 			reply <- names
 		}
 	}
+}
+
+func writeMarkers(room string, markers <-chan map[int64]int64) { // читает срезы закладок, пока канал не закрыт
+	defer recoverGoroutine("writeMarkers")
+	for snapshot := range markers {
+		if err := updateMarkers(room, snapshot); err != nil {
+			log.Printf("error %v", err)
+		}
+	}
+	log.Printf("room %s: writer stopped", room)
+}
+
+func updateMarkers(room string, snapshot map[int64]int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for userID, id := range snapshot {
+		_, err = tx.Exec("UPDATE rooms_reads SET last_message_id = ? WHERE user_id = ? AND room = ? AND last_message_id < ?", id, userID, room, id)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (rooms *roomsRelation) GetOrStartHub(name string) *Hub {
@@ -144,6 +195,8 @@ func (rooms *roomsRelation) RemoveRoom(name string) {
 
 func (clnt *Client) readPump() { // читает из client, передает в Hub
 	defer clnt.conn.Close()
+	defer func() { clnt.hub.unregister <- clnt }()
+	defer recoverGoroutine("readPump")
 	clnt.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	clnt.conn.SetPongHandler((func(appData string) error {
 		err := clnt.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -157,7 +210,6 @@ func (clnt *Client) readPump() { // читает из client, передает �
 		_, msg, err := clnt.conn.ReadMessage()
 		if err != nil {
 			logDisconnect(err)
-			clnt.hub.unregister <- clnt
 			break
 		}
 		var incoming IncomingMessage
@@ -189,7 +241,6 @@ func (clnt *Client) readPump() { // читает из client, передает �
 		data, err := json.Marshal(Message{ID: id, Nickname: clnt.nickname, Text: incoming.Text, ReplyTo: incoming.ReplyTo})
 		if err != nil {
 			log.Printf("error %v", err)
-			clnt.hub.unregister <- clnt
 			break
 		}
 		clnt.hub.broadcast <- MessageEvent{data: data, id: id}
@@ -200,6 +251,7 @@ func (clnt *Client) writePump() { // пишет в client, передает из
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	defer clnt.conn.Close()
+	defer recoverGoroutine("writePump")
 	for {
 		select {
 		case msg, ok := <-clnt.send:
@@ -305,14 +357,35 @@ func main() {
 	must(err)
 	err = goose.Up(db, "migrations")
 	must(err)
-	err = http.ListenAndServe(":8082", mux)
+	err = http.ListenAndServe(":8082", recoverMiddleware(mux))
 	must(err)
 }
 
 func must(err error) {
 	if err != nil {
-		log.Fatal("fatal", err)
+		log.Fatalf("fatal: %v", err)
 	}
+}
+
+func recoverGoroutine(name string) {
+	if r := recover(); r != nil {
+		log.Printf("panic in %s: %v\n%s", name, r, debug.Stack())
+	}
+}
+
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				if v == http.ErrAbortHandler {
+					panic(v)
+				}
+				log.Printf("panic in %s %s: %v\n%s", r.Method, r.URL.Path, v, debug.Stack())
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func serveIndex(w http.ResponseWriter, r *http.Request) {
