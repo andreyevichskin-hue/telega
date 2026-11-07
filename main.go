@@ -520,7 +520,7 @@ func roomsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	result := make(map[string][]string)
+	var names []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
@@ -528,6 +528,17 @@ func roomsHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unexpected error", 500)
 			return
 		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error %v", err)
+		http.Error(w, "unexpected error", 500)
+		return
+	}
+	rows.Close()
+
+	result := make(map[string][]string)
+	for _, name := range names {
 		hub, ok := registry.GetRoom(name)
 		if !ok {
 			result[name] = []string{}
@@ -536,11 +547,6 @@ func roomsHandler(w http.ResponseWriter, r *http.Request) {
 		reply := make(chan []string)
 		hub.list <- reply
 		result[name] = <-reply
-	}
-	if err := rows.Err(); err != nil {
-		log.Printf("error %v", err)
-		http.Error(w, "unexpected error", 500)
-		return
 	}
 
 	response, err := json.Marshal(result)
