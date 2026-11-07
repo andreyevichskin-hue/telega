@@ -393,34 +393,42 @@ func serveScript(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "script.js")
 }
 
-type contextKey string
+type userIDKey struct{}
 
-const IDKey contextKey = "userID"
+func withUserID(ctx context.Context, id int64) context.Context {
+	return context.WithValue(ctx, userIDKey{}, id)
+}
+
+func userIDFrom(ctx context.Context) (int64, bool) {
+	id, ok := ctx.Value(userIDKey{}).(int64)
+	return id, ok
+}
 
 func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("session")
 		if err != nil {
-			http.Error(w, "Cookie not found", 401)
-			log.Printf("error %v", err)
+			http.Error(w, "Cookie not found", http.StatusUnauthorized)
 			return
 		}
 		var userID int64
 		err = db.QueryRow("SELECT user_id FROM sessions WHERE token = ?", cookie.Value).Scan(&userID)
-		if err != nil {
-			http.Error(w, "Cookie not found", 401)
-			log.Printf("error %v", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "Cookie not found", http.StatusUnauthorized)
 			return
-		} else {
-			ctx := context.WithValue(r.Context(), IDKey, userID)
-			r = r.WithContext(ctx)
-			next(w, r)
 		}
+		if err != nil {
+			log.Printf("require auth: %v", err)
+			http.Error(w, "unexpected error", http.StatusInternalServerError)
+			return
+		}
+		r = r.WithContext(withUserID(r.Context(), userID))
+		next(w, r)
 	}
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) { // 1 запуск на 1 клиента
-	userID, ok := r.Context().Value(IDKey).(int64)
+	userID, ok := userIDFrom(r.Context())
 	if !ok {
 		http.Error(w, "unexpected error", 500)
 		return
@@ -582,7 +590,15 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := db.Exec("INSERT INTO users (username, password_hash) VALUES (?, ?)", user.Username, hash)
+	tx, err := db.Begin()
+	if err != nil {
+		http.Error(w, "unexpected error", 500)
+		log.Printf("error %v", err)
+		return
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec("INSERT INTO users (username, password_hash) VALUES (?, ?)", user.Username, hash)
 	if err != nil {
 		http.Error(w, "try another username", http.StatusInternalServerError)
 		log.Printf("error %v", err)
@@ -594,12 +610,18 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("error %v", err)
 		return
 	}
-	err = sessRelation(w, userID)
+	token, err := createSession(tx, userID)
 	if err != nil {
 		http.Error(w, "unexpected error", 500)
 		log.Printf("error %v", err)
 		return
 	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "unexpected error", 500)
+		log.Printf("error %v", err)
+		return
+	}
+	setSessionCookie(w, token)
 
 	w.Write([]byte("successful registration"))
 }
@@ -628,12 +650,13 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Incorrect login or password", 401)
 		return
 	}
-	err = sessRelation(w, userID)
+	token, err := createSession(db, userID)
 	if err != nil {
 		http.Error(w, "unexpected error", 500)
 		log.Printf("error %v", err)
 		return
 	}
+	setSessionCookie(w, token)
 
 	w.Write([]byte("logged in"))
 }
@@ -651,7 +674,7 @@ func generateToken() (string, error) {
 }
 
 func meHandler(w http.ResponseWriter, r *http.Request) {
-	userID, ok := r.Context().Value(IDKey).(int64)
+	userID, ok := userIDFrom(r.Context())
 	if !ok {
 		http.Error(w, "unexpected error", 500)
 		return
@@ -680,17 +703,23 @@ func decodeUser(r *http.Request) (User, error) {
 	return user, err
 }
 
-func sessRelation(w http.ResponseWriter, userID int64) error {
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func createSession(e execer, userID int64) (string, error) {
 	token, err := generateToken()
 	if err != nil {
-		log.Printf("error %v", err)
-		return err
+		return "", fmt.Errorf("create session: %w", err)
 	}
-	_, err = db.Exec("INSERT INTO sessions (token, user_id) VALUES (?, ?)", token, userID)
+	_, err = e.Exec("INSERT INTO sessions (token, user_id) VALUES (?, ?)", token, userID)
 	if err != nil {
-		log.Printf("error %v", err)
-		return err
+		return "", fmt.Errorf("create session user %d: %w", userID, err)
 	}
+	return token, nil
+}
+
+func setSessionCookie(w http.ResponseWriter, token string) {
 	cookie := http.Cookie{
 		Name:     "session",
 		Value:    token,
@@ -699,5 +728,4 @@ func sessRelation(w http.ResponseWriter, userID int64) error {
 		// Secure: true,
 	}
 	http.SetCookie(w, &cookie)
-	return nil
 }
