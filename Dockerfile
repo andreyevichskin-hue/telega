@@ -2,7 +2,7 @@ FROM golang:1.26.4 AS builder
 WORKDIR /base
 COPY ./main.go ./index.html ./style.css ./script.js ./go.mod ./go.sum /base/
 COPY ./migrations /base/migrations
-RUN go build -o telega
+RUN CGO_ENABLED=0 go build -o telega
 #EXPOSE 8082
 
 FROM alpine
