@@ -499,13 +499,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) { // 1 запуск на 
 	if len(history) > 0 {
 		newLastID = history[len(history)-1].ID
 	}
-	if found {
-		_, err = db.Exec("UPDATE rooms_reads SET last_message_id = ? WHERE user_id = ? AND room = ?", newLastID, userID, roomName)
-	} else {
-		_, err = db.Exec("INSERT INTO rooms_reads (user_id, room, last_message_id) VALUES (?, ?, ?)", userID, roomName, newLastID)
-	}
+	_, err = db.Exec(`INSERT INTO rooms_reads (user_id, room, last_message_id) VALUES (?, ?, ?)
+		ON CONFLICT (user_id, room) DO UPDATE SET last_message_id = MAX(last_message_id, excluded.last_message_id)`,
+		userID, roomName, newLastID)
 	if err != nil {
-		log.Printf("error %v", err)
+		log.Printf("ws: save bookmark: %v", err)
 	}
 
 	hub.register <- clnt
