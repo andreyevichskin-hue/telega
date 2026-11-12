@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"strconv"
 	"testing"
 
 	"github.com/pressly/goose/v3"
@@ -60,5 +61,39 @@ func TestLastRead(t *testing.T) {
 				t.Fatalf("lastID: expected %v, get %v", c.WantLastID, lastID)
 			}
 		})
+	}
+}
+
+func TestHistory(t *testing.T) {
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	defer testDB.Close()
+	testDB.SetMaxOpenConns(1)
+	err = goose.SetDialect("sqlite")
+	if err != nil {
+		t.Fatalf("failed to set dialect: %v", err)
+	}
+	err = goose.Up(testDB, "../../migrations")
+	if err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+	store := New(testDB)
+	for i := range 4 {
+		_, err := store.SaveMessage("room", "Andrew", strconv.Itoa(i+1), nil)
+		if err != nil {
+			t.Fatalf("failed to save message: %v", err)
+		}
+	}
+	history, err := store.History("room", 2)
+	if err != nil {
+		t.Fatalf("failed to get history: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("len: expected 2, get %d", len(history))
+	}
+	if history[0].Text != "3" || history[1].Text != "4" {
+		t.Fatalf("texts: expected 3, 4, get %s, %s", history[0].Text, history[1].Text)
 	}
 }
