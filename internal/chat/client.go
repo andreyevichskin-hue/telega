@@ -88,16 +88,17 @@ func (clnt *Client) writePump() { // пишет в client, передает из
 			if !ok {
 				return
 			}
+			clnt.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := clnt.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				log.Printf("error %v", err)
 				return
 			}
 		case <-ticker.C:
+			clnt.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := clnt.conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
 				log.Printf("error %v", err)
 				return
 			}
-			clnt.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		}
 	}
 }

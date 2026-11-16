@@ -51,8 +51,10 @@ func (h *Hub) Run() { // слушает каналы Hub через select
 		case clnt := <-h.register:
 			h.clients[clnt] = true
 		case clnt := <-h.unregister:
-			delete(h.clients, clnt)
-			close(clnt.send)
+			if h.clients[clnt] {
+				delete(h.clients, clnt)
+				close(clnt.send)
+			}
 			if len(h.clients) == 0 {
 				if len(lastMsgByUser) > 0 {
 					lastMsgTransfer <- lastMsgByUser
@@ -62,10 +64,9 @@ func (h *Hub) Run() { // слушает каналы Hub через select
 			}
 		case msg := <-h.broadcast:
 			for clnt := range h.clients {
-				if msg.id > lastMsgByUser[clnt.userID] {
+				if h.trySend(clnt, msg.data) && msg.id > lastMsgByUser[clnt.userID] {
 					lastMsgByUser[clnt.userID] = msg.id
 				}
-				clnt.send <- msg.data
 			}
 		case <-ticker.C:
 			if len(lastMsgByUser) == 0 {
@@ -76,7 +77,7 @@ func (h *Hub) Run() { // слушает каналы Hub через select
 			lastMsgByUser = make(map[int64]int64)
 		case signal := <-h.typing:
 			for clnt := range h.clients {
-				clnt.send <- signal
+				h.trySend(clnt, signal)
 			}
 		case reply := <-h.list:
 			var names []string
@@ -85,6 +86,17 @@ func (h *Hub) Run() { // слушает каналы Hub через select
 			}
 			reply <- names
 		}
+	}
+}
+
+func (h *Hub) trySend(clnt *Client, data []byte) bool {
+	select {
+	case clnt.send <- data:
+		return true
+	default:
+		delete(h.clients, clnt)
+		close(clnt.send)
+		return false
 	}
 }
 
