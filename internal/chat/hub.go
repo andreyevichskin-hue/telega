@@ -26,6 +26,7 @@ type Hub struct { // один на комнату, хранит список к�
 	unregister chan *Client
 	list       chan chan []string
 	typing     chan []byte
+	done       chan struct{}
 }
 
 type MessageEvent struct {
@@ -34,6 +35,7 @@ type MessageEvent struct {
 }
 
 func (h *Hub) Run() { // слушает каналы Hub через select
+	defer close(h.done)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("panic in hub %q: %v\n%s", h.name, r, debug.Stack())
@@ -100,15 +102,21 @@ func (h *Hub) trySend(clnt *Client, data []byte) bool {
 	}
 }
 
-// Members returns nicknames of connected clients. The Hub goroutine builds
-// the list, so the clients map is never read from another goroutine.
 func (h *Hub) Members() []string {
 	reply := make(chan []string)
-	h.list <- reply
-	return <-reply
+	select {
+	case h.list <- reply:
+	case <-h.done:
+		return nil
+	}
+	select {
+	case list := <-reply:
+		return list
+	case <-h.done:
+		return nil
+	}
 }
 
-// Join registers a connection in the hub and starts its read and write pumps.
 func (h *Hub) Join(conn *websocket.Conn, nickname string, userID int64) {
 	clnt := &Client{
 		hub:      h,
@@ -117,9 +125,17 @@ func (h *Hub) Join(conn *websocket.Conn, nickname string, userID int64) {
 		nickname: nickname,
 		userID:   userID,
 	}
-	h.register <- clnt
-	go clnt.readPump()
-	go clnt.writePump()
+	for {
+		select {
+		case h.register <- clnt:
+			go clnt.readPump()
+			go clnt.writePump()
+			return
+		case <-h.done:
+			h = h.registry.GetOrStartHub(h.name)
+			clnt.hub = h
+		}
+	}
 }
 
 func writeMarkers(store Store, room string, markers <-chan map[int64]int64) { // читает срезы закладок, пока канал не закрыт
@@ -160,6 +176,7 @@ func (rooms *Registry) GetOrStartHub(name string) *Hub {
 			unregister: make(chan *Client),
 			list:       make(chan chan []string),
 			typing:     make(chan []byte),
+			done:       make(chan struct{}),
 		}
 		go h.Run()
 		rooms.rooms[name] = h
