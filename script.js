@@ -46,6 +46,16 @@ function startChat(myNickname) {
     authScreen.classList.remove("visible");
     chatScreen.style.display = "flex";
 
+    const logoutTo = (path) => async () => {
+        try {
+            await fetch(path, { method: "POST", credentials: "same-origin" });
+        } finally {
+            location.reload();
+        }
+    };
+    document.getElementById("logout").addEventListener("click", logoutTo("/logout"));
+    document.getElementById("logout-all").addEventListener("click", logoutTo("/logout/all"));
+
     const roomList = document.getElementById("room-list");
     const roomCreateInput = document.getElementById("room-create-input");
     const messages = document.getElementById("messages");

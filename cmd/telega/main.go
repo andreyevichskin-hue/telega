@@ -47,6 +47,23 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				rowsNum, err := store.DeleteExpiredSessions()
+				if err != nil {
+					log.Printf("session cleanup: %v", err)
+					continue
+				}
+				log.Printf("session cleanup: removed %d expired sessions", rowsNum)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	errCh := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) && err != nil {
