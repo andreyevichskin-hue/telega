@@ -28,15 +28,17 @@ func NewServer(store *storage.Store, authService *auth.Service, rooms *chat.Regi
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.requireAuth(s.wsHandler))
+	mux.HandleFunc("GET /ws", s.requireAuth(s.wsHandler))
 	mux.HandleFunc("GET /rooms", s.requireAuth(s.roomsHandler))
 	mux.HandleFunc("POST /rooms", s.requireAuth(s.createRoomHandler))
-	mux.HandleFunc("/register", s.registerHandler)
-	mux.HandleFunc("/login", s.loginHandler)
-	mux.HandleFunc("/me", s.requireAuth(s.meHandler))
-	mux.HandleFunc("/", serveFile("index.html"))
-	mux.HandleFunc("/style.css", serveFile("style.css"))
-	mux.HandleFunc("/script.js", serveFile("script.js"))
+	mux.HandleFunc("POST /register", s.registerHandler)
+	mux.HandleFunc("POST /login", s.loginHandler)
+	mux.HandleFunc("GET /me", s.requireAuth(s.meHandler))
+	mux.HandleFunc("POST /logout", s.requireAuth(s.logoutHandler))
+	mux.HandleFunc("POST /logout/all", s.requireAuth(s.logoutAllHandler))
+	mux.HandleFunc("GET /{$}", serveFile("index.html"))
+	mux.HandleFunc("GET /style.css", serveFile("style.css"))
+	mux.HandleFunc("GET /script.js", serveFile("script.js"))
 	return recoverMiddleware(mux)
 }
 
@@ -79,8 +81,9 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "Cookie not found", http.StatusUnauthorized)
 			return
 		}
-		userID, err := s.auth.UserID(cookie.Value)
+		userID, err := s.auth.Authenticate(cookie.Value)
 		if errors.Is(err, auth.ErrInvalidCredentials) {
+			clearSessionCookie(w)
 			http.Error(w, "Cookie not found", http.StatusUnauthorized)
 			return
 		}
@@ -110,8 +113,19 @@ func setSessionCookie(w http.ResponseWriter, token string) {
 		Name:     "session",
 		Value:    token,
 		Path:     "/",
+		MaxAge:   30 * 24 * 60 * 60,
 		HttpOnly: true,
 		// Secure: true,
 	}
 	http.SetCookie(w, &cookie)
+}
+
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+	})
 }

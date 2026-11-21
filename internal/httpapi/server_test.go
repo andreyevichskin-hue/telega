@@ -36,7 +36,6 @@ func TestRegisterHandlers(t *testing.T) {
 	server := NewServer(store, authService, rooms)
 	h := server.Routes()
 
-	// step 1: /me without cookie
 	req := httptest.NewRequest(http.MethodGet, "/me", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -44,7 +43,6 @@ func TestRegisterHandlers(t *testing.T) {
 		t.Fatalf("no cookie: expected %d, get %d", http.StatusUnauthorized, rec.Code)
 	}
 
-	// step 2: register
 	body := strings.NewReader(`{"username":"andrew","password":"123"}`)
 	reqReg := httptest.NewRequest(http.MethodPost, "/register", body)
 	recReg := httptest.NewRecorder()
@@ -57,7 +55,6 @@ func TestRegisterHandlers(t *testing.T) {
 		t.Fatal("register: no cookie in response")
 	}
 
-	// step 3: /me with cookie
 	reqC := httptest.NewRequest(http.MethodGet, "/me", nil)
 	reqC.AddCookie(cookies[0])
 	recC := httptest.NewRecorder()

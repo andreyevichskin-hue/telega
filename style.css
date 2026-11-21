@@ -171,6 +171,24 @@ body {
     color: #8b8d92;
 }
 
+#logout,
+#logout-all {
+    margin: 0 8px 8px;
+    border: none;
+    outline: none;
+    padding: 8px 10px;
+    font-size: 14px;
+    border-radius: 8px;
+    background: #2b2d31;
+    color: #8b8d92;
+    cursor: pointer;
+}
+
+#logout:hover,
+#logout-all:hover {
+    color: #e3e3e3;
+}
+
 #chat-area {
     flex: 1;
     min-width: 0;

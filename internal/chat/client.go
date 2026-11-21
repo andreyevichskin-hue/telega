@@ -31,7 +31,12 @@ type incomingMessage struct {
 
 func (clnt *Client) readPump() { // читает из client, передает в Hub
 	defer clnt.conn.Close()
-	defer func() { clnt.hub.unregister <- clnt }()
+	defer func() {
+		select {
+		case clnt.hub.unregister <- clnt:
+		case <-clnt.hub.done:
+		}
+	}()
 	defer recoverGoroutine("readPump")
 	clnt.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	clnt.conn.SetPongHandler((func(appData string) error {
@@ -60,7 +65,11 @@ func (clnt *Client) readPump() { // читает из client, передает �
 				log.Printf("error %v", err)
 				continue
 			}
-			clnt.hub.typing <- signal
+			select {
+			case <-clnt.hub.done:
+				return
+			case clnt.hub.typing <- signal:
+			}
 			continue
 		}
 		id, err := clnt.hub.store.SaveMessage(clnt.hub.name, clnt.nickname, incoming.Text, incoming.ReplyTo)
@@ -73,7 +82,11 @@ func (clnt *Client) readPump() { // читает из client, передает �
 			log.Printf("error %v", err)
 			break
 		}
-		clnt.hub.broadcast <- MessageEvent{data: data, id: id}
+		select {
+		case <-clnt.hub.done:
+			return
+		case clnt.hub.broadcast <- MessageEvent{data: data, id: id}:
+		}
 	}
 }
 
@@ -88,16 +101,17 @@ func (clnt *Client) writePump() { // пишет в client, передает из
 			if !ok {
 				return
 			}
+			clnt.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := clnt.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				log.Printf("error %v", err)
 				return
 			}
 		case <-ticker.C:
+			clnt.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := clnt.conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
 				log.Printf("error %v", err)
 				return
 			}
-			clnt.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		}
 	}
 }

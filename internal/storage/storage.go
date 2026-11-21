@@ -9,6 +9,10 @@ import (
 
 var ErrUsernameTaken = errors.New("username taken")
 
+const sessionIdle = "-7 days"
+const sessionMaxAge = "-30 days"
+const touchEvery = "-1 hour"
+
 type Message struct {
 	ID       int64  `json:"id"`
 	Nickname string `json:"nickname"`
@@ -183,7 +187,7 @@ func (s *Store) CreateUserWithSession(username string, passwordHash []byte, toke
 	if err != nil {
 		return fmt.Errorf("create user %q: %w", username, err)
 	}
-	if _, err = tx.Exec("INSERT INTO sessions (token, user_id) VALUES (?, ?)", token, userID); err != nil {
+	if _, err = tx.Exec("INSERT INTO sessions (token, user_id, last_seen_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, userID); err != nil {
 		return fmt.Errorf("create session user %d: %w", userID, err)
 	}
 	if err = tx.Commit(); err != nil {
@@ -193,7 +197,7 @@ func (s *Store) CreateUserWithSession(username string, passwordHash []byte, toke
 }
 
 func (s *Store) CreateSession(token string, userID int64) error {
-	_, err := s.db.Exec("INSERT INTO sessions (token, user_id) VALUES (?, ?)", token, userID)
+	_, err := s.db.Exec("INSERT INTO sessions (token, user_id, last_seen_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, userID)
 	if err != nil {
 		return fmt.Errorf("create session user %d: %w", userID, err)
 	}
@@ -203,9 +207,43 @@ func (s *Store) CreateSession(token string, userID int64) error {
 // UserIDBySession returns sql.ErrNoRows (wrapped) for an unknown token.
 func (s *Store) UserIDBySession(token string) (int64, error) {
 	var userID int64
-	err := s.db.QueryRow("SELECT user_id FROM sessions WHERE token = ?", token).Scan(&userID)
+	err := s.db.QueryRow("SELECT user_id FROM sessions WHERE token = ? AND last_seen_at > datetime('now', ?) AND created_at > datetime('now', ?)", token, sessionIdle, sessionMaxAge).Scan(&userID)
 	if err != nil {
 		return 0, fmt.Errorf("get session: %w", err)
 	}
 	return userID, nil
+}
+
+func (s *Store) DeleteSession(token string) error {
+	_, err := s.db.Exec("DELETE FROM sessions WHERE token = ?", token)
+	if err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteExpiredSessions() (int64, error) {
+	result, err := s.db.Exec("DELETE FROM sessions WHERE last_seen_at <= datetime('now', ?) OR created_at <= datetime('now', ?)", sessionIdle, sessionMaxAge)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired sessions: %w", err)
+	}
+	rowsNum, _ := result.RowsAffected()
+	return rowsNum, nil
+}
+
+func (s *Store) TouchSession(token string) error {
+	_, err := s.db.Exec("UPDATE sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token = ? AND last_seen_at < datetime('now', ?)", token, touchEvery)
+	if err != nil {
+		return fmt.Errorf("update session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteUserSessions(userID int64) (int64, error) {
+	result, err := s.db.Exec("DELETE FROM sessions WHERE user_id = ?", userID)
+	if err != nil {
+		return 0, fmt.Errorf("delete user sessions: %w", err)
+	}
+	rowsNum, _ := result.RowsAffected()
+	return rowsNum, nil
 }

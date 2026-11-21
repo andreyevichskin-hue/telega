@@ -186,3 +186,37 @@ func (s *Server) meHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewEncoder(w).Encode(map[string]string{"username": nickname})
 }
+
+func (s *Server) logoutHandler(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie("session")
+	if err != nil {
+		log.Printf("error %v", err)
+		http.Error(w, "unexpected error", 500)
+		return
+	}
+	token := cookie.Value
+	err = s.auth.Logout(token)
+	if err != nil {
+		log.Printf("error %v", err)
+		http.Error(w, "unexpected error", 500)
+		return
+	}
+	clearSessionCookie(w)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) logoutAllHandler(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userIDFrom(r.Context())
+	if !ok {
+		http.Error(w, "unexpected error", 500)
+		return
+	}
+	err := s.auth.LogoutAll(userID)
+	if err != nil {
+		log.Printf("error %v", err)
+		http.Error(w, "unexpected error", 500)
+		return
+	}
+	clearSessionCookie(w)
+	w.WriteHeader(http.StatusOK)
+}

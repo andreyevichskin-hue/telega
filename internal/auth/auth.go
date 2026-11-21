@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -62,14 +63,17 @@ func (s *Service) Login(username, password string) (string, error) {
 	return token, nil
 }
 
-// UserID resolves a session token. Unknown tokens give ErrInvalidCredentials.
-func (s *Service) UserID(token string) (int64, error) {
+func (s *Service) Authenticate(token string) (int64, error) {
 	userID, err := s.store.UserIDBySession(token)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrInvalidCredentials
 	}
 	if err != nil {
 		return 0, fmt.Errorf("auth: %w", err)
+	}
+	if err := s.store.TouchSession(token); err != nil {
+		log.Printf("token ttl: %v", err)
+		return userID, nil
 	}
 	return userID, nil
 }
@@ -80,4 +84,20 @@ func generateToken(r io.Reader) (string, error) {
 		return "", fmt.Errorf("generate token: %w", err)
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+func (s *Service) Logout(token string) error {
+	err := s.store.DeleteSession(token)
+	if err != nil {
+		return fmt.Errorf("logout: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) LogoutAll(userID int64) error {
+	_, err := s.store.DeleteUserSessions(userID)
+	if err != nil {
+		return fmt.Errorf("logout all: %w", err)
+	}
+	return nil
 }
